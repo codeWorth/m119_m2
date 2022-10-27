@@ -29,7 +29,6 @@ const printIfHaveData = () => {
 
   if (Math.abs(z) > 1 && angle > 1.2) {
     console.log("VERTICAL MOVE (" + len + ", " + angle + ")");
-    console.log(x, y, z);
   }
 
   x_val = undefined;

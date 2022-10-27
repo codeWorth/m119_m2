@@ -25,19 +25,27 @@ int g_av_count = 0;
 const float sample_rate = 1.0f / 104.0f;
 const float g_cutoff = 0.0001;
 const float deg_to_rad = PI / 180.0f;
-const float movement_decel = 0.975f;
-const float movement_k = 5.0f;
+const float movement_decel = 0.99f;
+const float movement_k = 8.0f;
 const float max_radians_per_cycle = 6.0f * sample_rate;
 
+const Matrix<3> DOWN = {0, 0, -1};
+Matrix<3, 3> IMU_BASIS = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 Matrix<3, 3> ROT_MAT_X;
 Matrix<3, 3> ROT_MAT_Y;
 Matrix<3, 3> ROT_MAT_Z;
-Matrix<3, 3> CURRENT_ORIENTATION = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-Matrix<3> DOWN = {0, 0, 1};
 
 Matrix<3> REAL_ACCEL;
 Matrix<3> VELOCITY = {0, 0, 0};
 Matrix<3> POSITION = {0, 0, 0};
+
+void putIdentity(Matrix<3, 3>& out) {
+  out = {
+    1, 0, 0,
+    0, 1, 0,
+    0, 0, 1
+  };
+}
 
 void putCrossProductMatrix(Matrix<3, 3>& out, const Matrix<3>& vec) {
   out = {
@@ -94,23 +102,13 @@ void putRotateATowardsB(Matrix<3, 3>& out, const Matrix<3>& a, const Matrix<3>& 
   float sin_ang = sin(ang);
 
   // If parallel, do nothing
-  if (sin_ang < 0.001f && cos_ang >= 0) {
-    out = {
-      1, 0, 0,
-      0, 1, 0,
-      0, 0, 1
-    };
-    return;
-  }
+  if (sin_ang < 0.001f) {
+    putIdentity(out);
 
-  // If anti-parallel, invert
-  if (sin_ang < 0.001f && cos_ang < 0) {
-    Serial.println(F("\tFLIPPING TIME!"));
-    out = {
-      -1, 0, 0,
-      0, -1, 0,
-      0, 0, -1
-    };
+    // If anti-parallel, invert
+    if (cos_ang < 0) {
+      out *= -1;
+    }
     return;
   }
 
@@ -220,18 +218,10 @@ void loop() {
       gz -= g_zoff;
       gz = (abs(gz) < g_cutoff) ? 0 : gz;
 
-      // Rotate orientation around current x (forward) axis
-      putRotateAroundV(ROT_MAT_X, CURRENT_ORIENTATION.Submatrix<3, 1>(0, 0), gy);
-
-      // Rotate orientation around current y (sideways) axis
-      putRotateAroundV(ROT_MAT_Y, CURRENT_ORIENTATION.Submatrix<3, 1>(0, 1), gz);
-
-      // Rotate orientation around current z (vertical) axis
-      putRotateAroundV(ROT_MAT_Z, CURRENT_ORIENTATION.Submatrix<3, 1>(0, 2), gz);
-
-      // not sure if order matters here
-      // CURRENT_ORIENTATION = ROT_MAT_X * CURRENT_ORIENTATION;
-      CURRENT_ORIENTATION = ROT_MAT_Z * (ROT_MAT_Y * (ROT_MAT_X * CURRENT_ORIENTATION));
+      putRotateAroundV(ROT_MAT_X, IMU_BASIS.Submatrix<3, 1>(0, 0), gx);
+      putRotateAroundV(ROT_MAT_Y, IMU_BASIS.Submatrix<3, 1>(0, 1), gy);
+      putRotateAroundV(ROT_MAT_Z, IMU_BASIS.Submatrix<3, 1>(0, 2), gz);
+      IMU_BASIS = ROT_MAT_Z * (ROT_MAT_Y * (ROT_MAT_X * IMU_BASIS));
 
       // stillness = e ^ (-k * movement)
       float mag_A = sqrt(dot(A, A));
@@ -239,20 +229,17 @@ void loop() {
       movement = max(current_movement, movement * movement_decel);
       float max_amount = exp(-movement_k * movement) * max_radians_per_cycle;
 
-      Matrix<3> imu_down = (~CURRENT_ORIENTATION) * DOWN;
-      Serial << CURRENT_ORIENTATION * 100 << '\n';
-      // Serial << imu_down * 100 << '\t' << A * 100 << '\n';
+      // We would like to align what the IMU thinks is down w/ (0, 0, -1) when we are stationary
+      // Down according to the IMU is the accelerometer's direction, converted to world space
+      Matrix<3> world_accel = IMU_BASIS * A; // this is the guess for world down
+      world_accel *= -1; // since gravity is pulling, accelerometer sees down as positive, so invert
+      world_accel /= mag_A; // normalize
+      putRotateATowardsB(ROT_MAT_X, world_accel, DOWN, max_amount);
+      IMU_BASIS = ROT_MAT_X * IMU_BASIS;
 
-      // putRotateATowardsB(ROT_MAT, CURRENT_ORIENTATION.Submatrix<3, 1>(0, 2), A / mag_A, max_amount);
-      // CURRENT_ORIENTATION = ROT_MAT * CURRENT_ORIENTATION;
-
+      world_accel = IMU_BASIS * A; // recalculate after calibration
       // subtract off the existing 1 G downwards from gravity
-      REAL_ACCEL(0) = A(0) - CURRENT_ORIENTATION(0, 2);
-      REAL_ACCEL(1) = A(1) - CURRENT_ORIENTATION(1, 2);
-      REAL_ACCEL(2) = A(2) - CURRENT_ORIENTATION(2, 2);
-
-      // change from IMU coordinate space to world space
-      Matrix<3> world_accel = CURRENT_ORIENTATION * REAL_ACCEL;
+      world_accel(2) -= 1;
 
       if (central) {
         accelerometerCharacteristicX.writeValue(world_accel(0));
